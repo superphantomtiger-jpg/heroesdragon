@@ -1,0 +1,75 @@
+name: HeroesDragon Android
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    container: wesnoth/wesnoth:android
+    env:
+      API: 23
+      BUILDBASEDIR: ${{ github.workspace }}/packaging/android
+      PREFIXDIR: ${{ github.workspace }}/packaging/android/prefix
+      DOWNLOADDIR: ${{ github.workspace }}/packaging/android/download
+      BUILDDIR: ${{ github.workspace }}/packaging/android/build
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - name: Prepare HeroesDragon Android configuration
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          root = Path('packaging/android')
+          p = root / 'build.gradle'
+          p.write_text(p.read_text().replace("version '8.7.0'", "version '8.10.1'"))
+          p = root / 'app/build.gradle'
+          text = p.read_text().replace('compileSdk 35', 'compileSdk 36').replace('targetSdk 35', 'targetSdk 36')
+          text = text.replace('applicationId "org.wesnoth.Wesnoth"', 'applicationId "com.superphantomtiger.heroesdragon"')
+          p.write_text(text)
+          p = root / 'app/src/main/AndroidManifest.xml'
+          p.write_text(p.read_text().replace('android:authorities="org.wesnoth.Wesnoth.fileprovider"', 'android:authorities="${applicationId}.fileprovider"'))
+          for p in (root / 'app/src/main/res').glob('values*/strings.xml'):
+              p.write_text(re.sub(r'<string name="app_name">.*?</string>', '<string name="app_name">HeroesDragon</string>', p.read_text()))
+          PY
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;35.0.0"
+          chmod +x packaging/android/gradlew
+      - name: Restore native dependencies
+        id: deps
+        uses: actions/cache@v5
+        with:
+          path: packaging/android/prefix
+          key: heroesdragon-android-ndk26-${{ hashFiles('packaging/android/build-android-dependencies/*') }}
+      - name: Build native dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        working-directory: packaging/android
+        run: ./gradlew buildCppDepends
+      - name: Build game and test APKs
+        working-directory: packaging/android
+        run: ./gradlew buildCppSource assembleDebug bundleDebug
+      - name: Save exact build source and notices
+        shell: bash
+        run: |
+          git diff > heroesdragon-build-changes.patch
+          git rev-parse HEAD > heroesdragon-source-commit.txt
+          cp COPYING heroesdragon-COPYING.txt
+      - name: Upload APKs and source changes
+        uses: actions/upload-artifact@v7
+        with:
+          name: HeroesDragon-test-APKs
+          if-no-files-found: error
+          path: |
+            packaging/android/app/build/outputs/apk/debug/*.apk
+            heroesdragon-build-changes.patch
+            heroesdragon-source-commit.txt
+            heroesdragon-COPYING.txt
+      - name: Upload debug AAB
+        uses: actions/upload-artifact@v7
+        with:
+          name: HeroesDragon-debug-AAB-not-for-Play
+          if-no-files-found: error
+          path: packaging/android/app/build/outputs/bundle/debug/*.aab
