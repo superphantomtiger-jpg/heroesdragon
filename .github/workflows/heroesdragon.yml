@@ -1,6 +1,9 @@
 name: HeroesDragon Android
 on:
   workflow_dispatch:
+  push:
+    branches: [heroesdragon-android]
+    paths: ['.github/workflows/heroesdragon.yml']
 permissions:
   contents: read
 jobs:
