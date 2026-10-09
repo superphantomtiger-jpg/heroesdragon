@@ -1,0 +1,90 @@
+name: HeroesDragon verify existing mobile APKs
+on:
+  workflow_dispatch:
+  push:
+    branches: [heroesdragon-android]
+    paths: ['.github/workflows/heroesdragon-verify.yml']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download exact mobile APK artifact from run 5
+        uses: actions/download-artifact@v5
+        with:
+          name: HeroesDragon-test-APKs
+          run-id: 37955210055
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: apk-artifact
+      - name: Verify native memory layout and APK ZIP alignment
+        run: |
+          python3 - <<'PY'
+          """Check 64-bit APK LOAD alignment and Android's rounded RELRO protection range."""
+          import struct
+          import zipfile
+          from pathlib import Path
+          
+          PAGE = 16384
+          
+          def relro_overlaps_writable(headers):
+              problems = []
+              for kind, flags, offset, address, physical, filesz, memsz, alignment in headers:
+                  if kind != 0x6474e552 or not memsz:
+                      continue
+                  end = address + memsz
+                  start_page = address // PAGE * PAGE
+                  end_page = (end + PAGE - 1) // PAGE * PAGE
+                  for load in headers:
+                      if load[0] != 1 or not load[1] & 2:
+                          continue
+                      lo = max(start_page, load[3])
+                      hi = min(end_page, load[3] + load[6])
+                      if lo < hi and (lo < address or hi > end):
+                          problems.append((lo, hi))
+              return problems
+          
+          def header(kind, addr, size, flags=2, alignment=PAGE):
+              return (kind, flags, 0, addr, addr, size, size, alignment)
+          
+          # A padded segment is safe even when RELRO ends inside a page.
+          assert not relro_overlaps_writable([header(1, 0x10000, 0x1000), header(1, 0x15000, 0x1000), header(0x6474e552, 0x10000, 0x1000)])
+          # Writable bytes directly after RELRO in its rounded page must fail.
+          assert relro_overlaps_writable([header(1, 0x10000, 0x2000), header(0x6474e552, 0x10000, 0x1000)])
+          # Writable bytes immediately before an unaligned RELRO start must also fail.
+          assert relro_overlaps_writable([header(1, 0x10000, 0x4000), header(0x6474e552, 0x11000, 0x3000)])
+          
+          def check(directory):
+              failures, checked, padded = [], 0, 0
+              for apk in Path(directory).rglob('*.apk'):
+                  with zipfile.ZipFile(apk) as archive:
+                      for name in archive.namelist():
+                          if not name.startswith(('lib/arm64-v8a/', 'lib/x86_64/')) or not name.endswith('.so'):
+                              continue
+                          data = archive.read(name)
+                          assert data[:6] == b'\x7fELF\x02\x01', name
+                          offset = struct.unpack_from('<Q', data, 32)[0]
+                          size, count = struct.unpack_from('<HH', data, 54)
+                          assert size == 56 and offset + size * count <= len(data), name
+                          headers = [struct.unpack_from('<IIQQQQQQ', data, offset + i * size) for i in range(count)]
+                          for h in headers:
+                              if h[0] == 1 and (h[7] < PAGE or (h[3] - h[2]) % PAGE):
+                                  failures.append(f'{apk.name}: {name}: invalid 16 KB LOAD alignment')
+                          if relro_overlaps_writable(headers):
+                              failures.append(f'{apk.name}: {name}: rounded RELRO covers writable bytes outside RELRO')
+                          padded += any(h[0] == 0x6474e552 and (h[3] + h[6]) % PAGE for h in headers)
+                          checked += 1
+              assert checked, 'No 64-bit libraries found'
+              assert not failures, '\n'.join(failures)
+              print(f'Passed LOAD and RELRO memory-layout checks for {checked} libraries ({padded} padded RELRO segments). Runtime testing on a 16 KB device is still required.')
+          
+          check('apk-artifact')
+          import os, subprocess
+          buildtools = Path(os.environ['ANDROID_HOME']) / 'build-tools'
+          zipalign = sorted(buildtools.glob('*/zipalign'), key=lambda p: tuple(int(v) for v in p.parent.name.split('.') if v.isdigit()))[-1]
+          for apk in Path('apk-artifact').rglob('*.apk'):
+              subprocess.run([str(zipalign), '-c', '-P', '16', '4', str(apk)], check=True)
+          print('ZIP alignment passed for all APKs. Gameplay and 16 KB runtime validation are still separate checks.')
+          PY
