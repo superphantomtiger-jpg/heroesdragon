@@ -24,6 +24,10 @@ jobs:
       - name: Prepare HeroesDragon Android configuration
         shell: bash
         run: |
+          echo "BUILDBASEDIR=$GITHUB_WORKSPACE/packaging/android" >> "$GITHUB_ENV"
+          echo "PREFIXDIR=$GITHUB_WORKSPACE/packaging/android/prefix" >> "$GITHUB_ENV"
+          echo "DOWNLOADDIR=$GITHUB_WORKSPACE/packaging/android/download" >> "$GITHUB_ENV"
+          echo "BUILDDIR=$GITHUB_WORKSPACE/packaging/android/build" >> "$GITHUB_ENV"
           python3 - <<'PY'
           from pathlib import Path
           import re
@@ -51,16 +55,24 @@ jobs:
         if: steps.deps.outputs.cache-hit != 'true'
         working-directory: packaging/android
         run: ./gradlew buildCppDepends
+      - name: Save completed native dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: packaging/android/prefix
+          key: ${{ steps.deps.outputs.cache-primary-key }}
       - name: Build game and test APKs
         working-directory: packaging/android
         run: ./gradlew buildCppSource assembleDebug bundleDebug
       - name: Save exact build source and notices
         shell: bash
         run: |
-          git diff > heroesdragon-build-changes.patch
-          git rev-parse HEAD > heroesdragon-source-commit.txt
+          cd "$GITHUB_WORKSPACE"
+          git -c safe.directory="$GITHUB_WORKSPACE" diff > heroesdragon-build-changes.patch
+          git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD > heroesdragon-source-commit.txt
           cp COPYING heroesdragon-COPYING.txt
       - name: Upload APKs and source changes
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
           name: HeroesDragon-test-APKs
@@ -71,8 +83,10 @@ jobs:
             heroesdragon-source-commit.txt
             heroesdragon-COPYING.txt
       - name: Upload debug AAB
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
           name: HeroesDragon-debug-AAB-not-for-Play
           if-no-files-found: error
           path: packaging/android/app/build/outputs/bundle/debug/*.aab
+
